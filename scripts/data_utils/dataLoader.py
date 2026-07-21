@@ -74,7 +74,8 @@ class S3DIS(Dataset):
 # Define class for testing set data loader
 class ScannetDatasetWholeScene():
     # prepare to give prediction on each points
-    def __init__(self, root, block_points=4096, split='test', test_area=5, stride=25.0, block_size=25.0, padding=0.001):
+    # PERUBAHAN: Tambahkan root=None dan data_list=None sebagai parameter opsional
+    def __init__(self, root=None, data_list=None, block_points=4096, split='test', test_area=5, stride=25.0, block_size=25.0, padding=0.001):
         self.block_points = block_points
         self.block_size = block_size
         self.padding = padding
@@ -82,31 +83,41 @@ class ScannetDatasetWholeScene():
         self.split = split
         self.stride = stride
         self.scene_points_num = []
-        assert split in ['train', 'test']
-        if self.split == 'train':
-            self.file_list = [d for d in os.listdir(root) if d.find('Area_%d' % test_area) == -1]
-        else:
-            self.file_list = [d for d in os.listdir(root) if d.find('Area_%d' % test_area) != -1]
+        
         self.scene_points_list = []
         self.semantic_labels_list = []
         self.room_coord_min, self.room_coord_max = [], []
-        for file in self.file_list:
-            data = np.load(root + file)
-            points = data[:, :3]
-            self.scene_points_list.append(data[:, :-1])
-            self.semantic_labels_list.append(data[:, -1])
-            coord_min, coord_max = np.amin(points, axis=0)[:3], np.amax(points, axis=0)[:3]
-            self.room_coord_min.append(coord_min), self.room_coord_max.append(coord_max)
-        assert len(self.scene_points_list) == len(self.semantic_labels_list)
 
-        # labelweights = np.zeros(3) # Number of classes
-        # for seg in self.semantic_labels_list:
-        #     tmp, _ = np.histogram(seg, range(4)) # Number of classes + 1
-        #     self.scene_points_num.append(seg.shape[0])
-        #     labelweights += tmp
-        # labelweights = labelweights.astype(np.float32)
-        # labelweights = labelweights / np.sum(labelweights)
-        # self.labelweights = np.power(np.amax(labelweights) / labelweights, 1 / 3.0)
+        # ==============================================================
+        # LOGIKA IN-MEMORY PROCESSING (Bypass Hardisk)
+        # ==============================================================
+        if data_list is not None:
+            # Jika dikirim langsung dari RAM (predict_rgb.py)
+            for data in data_list:
+                points = data[:, :3]
+                self.scene_points_list.append(data[:, :-1])
+                self.semantic_labels_list.append(data[:, -1])
+                coord_min, coord_max = np.amin(points, axis=0)[:3], np.amax(points, axis=0)[:3]
+                self.room_coord_min.append(coord_min), self.room_coord_max.append(coord_max)
+                
+        else:
+            # Jika menggunakan mode lama (Membaca file .npy dari folder)
+            assert split in ['train', 'test']
+            if self.split == 'train':
+                self.file_list = [d for d in os.listdir(root) if d.find('Area_%d' % test_area) == -1]
+            else:
+                self.file_list = [d for d in os.listdir(root) if d.find('Area_%d' % test_area) != -1]
+                
+            for file in self.file_list:
+                data = np.load(root + file)
+                points = data[:, :3]
+                self.scene_points_list.append(data[:, :-1])
+                self.semantic_labels_list.append(data[:, -1])
+                coord_min, coord_max = np.amin(points, axis=0)[:3], np.amax(points, axis=0)[:3]
+                self.room_coord_min.append(coord_min), self.room_coord_max.append(coord_max)
+        # ==============================================================
+
+        assert len(self.scene_points_list) == len(self.semantic_labels_list)
         
         labelweights = np.zeros(3) # Number of classes
         for seg in self.semantic_labels_list:
@@ -116,7 +127,7 @@ class ScannetDatasetWholeScene():
         labelweights = labelweights.astype(np.float32)
         labelweights = labelweights / np.sum(labelweights)
         
-        # PERBAIKAN: Tambahkanepsilon (1e-6) untuk mencegah divide by zero jika ada kelas yang kosong/0
+        # PERBAIKAN: Tambahkan epsilon (1e-6) untuk mencegah divide by zero jika ada kelas yang kosong/0
         epsilon = 1e-6
         self.labelweights = np.power(np.amax(labelweights) / (labelweights + epsilon), 1 / 3.0)
 

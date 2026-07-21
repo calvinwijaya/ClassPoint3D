@@ -19,43 +19,73 @@ import pyqtgraph.opengl as gl
 class ProcessThread(QThread):
     output_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(bool)
+    progress_signal = pyqtSignal(int)
 
-    def __init__(self, point_cloud, model, output_dir, batch_size):
+    def __init__(self, point_clouds, model, output_dir, batch_size):
         super().__init__()
-        self.point_cloud = point_cloud
+        # point_clouds sekarang berupa list of file paths
+        self.point_clouds = point_clouds 
         self.model = model
         self.output_dir = output_dir
         self.batch_size = batch_size
 
     def run(self):
         try:
-            command = [
-                'python', "scripts/predict_rgb.py",
-                '--batch_size', str(int(self.batch_size)),
-                '--model', self.model,
-                '--point_cloud', self.point_cloud,
-                '--output_dir', self.output_dir
-            ]
+            total_files = len(self.point_clouds)
             
-            self.output_signal.emit(f"Running Command: {' '.join(command)}")
+            for file_idx, point_cloud_file in enumerate(self.point_clouds):
+                filename = os.path.basename(point_cloud_file)
+                self.output_signal.emit(f"\n========================================")
+                self.output_signal.emit(f"Memproses File [{file_idx + 1}/{total_files}]: {filename}")
+                self.output_signal.emit(f"========================================\n")
+                
+                command = [
+                    'python', "scripts/predict_rgb.py",
+                    '--batch_size', str(int(self.batch_size)),
+                    '--model', self.model,
+                    '--point_cloud', point_cloud_file,
+                    '--output_dir', self.output_dir
+                ]
+                
+                process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
 
-            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+                for line in process.stdout:
+                    text = line.strip()
+                    if text.startswith("PROGRESS:"):
+                        try:
+                            # Hitung progres file saat ini
+                            numbers = text.split(":")[1].split("/")
+                            current = int(numbers[0])
+                            total = int(numbers[1])
+                            file_fraction = current / total
+                            
+                            # Hitung progres global (keseluruhan batch)
+                            global_percent = int(((file_idx + file_fraction) / total_files) * 100)
+                            self.progress_signal.emit(global_percent)
+                        except:
+                            pass
+                    else:
+                        self.output_signal.emit(text)
 
-            for line in process.stdout:
-                self.output_signal.emit(line.strip())
-            for line in process.stderr:
-                self.output_signal.emit(f"Error: {line.strip()}")
+                for line in process.stderr:
+                    self.output_signal.emit(f"Error: {line.strip()}")
 
-            process.stdout.close()
-            process.stderr.close()
-            return_code = process.wait()
+                process.stdout.close()
+                process.stderr.close()
+                return_code = process.wait()
+                
+                # Jika ada satu file yang gagal (return code != 0), hentikan proses
+                if return_code != 0:
+                    self.output_signal.emit(f"Proses terhenti karena error pada file: {filename}")
+                    self.finished_signal.emit(False)
+                    return
 
-            self.finished_signal.emit(return_code == 0)
+            # Jika looping selesai untuk semua file
+            self.finished_signal.emit(True)
         
         except Exception as e:
             self.output_signal.emit(f"Error: {str(e)}")
             self.finished_signal.emit(False)
-
 
 # --- WIDGET VIEWER 3D CUSTOM ---
 class PointCloudViewer(QWidget):
@@ -171,18 +201,26 @@ class PointCloudClassificationGUI(QWidget):
         config_group = QGroupBox("Project Configuration")
         config_layout = QVBoxLayout()
 
-        self.pointcloud_label = QLabel('Point Cloud Input (.las):')
+        # --- BLOK POINT CLOUD INPUT (UBAH BAGIAN INI DI DALAM initUI) ---
+        self.pointcloud_label = QLabel('Point Cloud Input (File .las atau Folder):')
         self.pointcloud_path = QLineEdit(self)
         self.pointcloud_path.setReadOnly(True)
-        self.pointcloud_path.setPlaceholderText("Select LAS file...")
-        self.pointcloud_btn = QPushButton('Browse...')
-        self.pointcloud_btn.clicked.connect(self.select_pointcloud)
+        self.pointcloud_path.setPlaceholderText("Select single LAS file OR folder...")
+        
+        self.pointcloud_file_btn = QPushButton('Select File')
+        self.pointcloud_file_btn.clicked.connect(self.select_pointcloud_file)
+        
+        self.pointcloud_folder_btn = QPushButton('Select Folder')
+        self.pointcloud_folder_btn.clicked.connect(self.select_pointcloud_folder)
+        
         pc_layout = QHBoxLayout()
         pc_layout.addWidget(self.pointcloud_path)
-        pc_layout.addWidget(self.pointcloud_btn)
+        pc_layout.addWidget(self.pointcloud_file_btn)
+        pc_layout.addWidget(self.pointcloud_folder_btn)  # Tombol baru ditambahkan ke layout
         config_layout.addWidget(self.pointcloud_label)
         config_layout.addLayout(pc_layout)
-
+        # -------------------------------------------------------------
+        
         self.model_label = QLabel('Deep Learning Model (.t7):')
         self.model_path = QLineEdit(self)
         self.model_path.setReadOnly(True)
@@ -261,7 +299,8 @@ class PointCloudClassificationGUI(QWidget):
         status_layout = QVBoxLayout()
         self.progress_bar = QProgressBar(self)
         self.progress_bar.setValue(0)
-        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("Memproses Klasifikasi... %p%")
         self.log_console = QTextEdit(self)
         self.log_console.setReadOnly(True)
         self.log_console.setStyleSheet("background-color: #f8f9fa; border: 1px solid #ced4da; font-family: Consolas;")
@@ -295,6 +334,12 @@ class PointCloudClassificationGUI(QWidget):
         splitter.setSizes([400, 800])
         main_layout.addWidget(splitter)
 
+    def update_progress_bar(self, value):
+        if self.progress_bar.maximum() == 0:
+            self.progress_bar.setMaximum(100)
+            
+        self.progress_bar.setValue(value)
+
     def toggle_advanced_options(self):
         is_checked = self.advanced_options_btn.isChecked()
         self.adv_content.setVisible(is_checked)
@@ -306,12 +351,27 @@ class PointCloudClassificationGUI(QWidget):
             self.model_path.setText(model)
             self.log_console.append(f"Selected Model: {model}")
 
-    def select_pointcloud(self):
-        pointcloud, _ = QFileDialog.getOpenFileName(self, "Select Point Cloud (*.las)", "", "LAS Files (*.las)")
+    def select_pointcloud_file(self):
+        pointcloud, _ = QFileDialog.getOpenFileName(self, "Select Point Cloud (*.las)", "", "LAS Files (*.las *.laz)")
         if pointcloud:
             self.pointcloud_path.setText(pointcloud)
-            self.log_console.append(f"Selected Point Cloud: {pointcloud}")
-            self.process_and_render_las(pointcloud, self.viewer_rgb, is_classification=False) 
+            self.log_console.append(f"Selected Point Cloud File: {pointcloud}")
+            self.process_and_render_las(pointcloud, self.viewer_rgb, is_classification=False)
+
+    def select_pointcloud_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Folder Containing LAS/LAZ Files")
+        if folder:
+            self.pointcloud_path.setText(folder)
+            self.log_console.append(f"Selected Folder for Batch Processing: {folder}")
+            
+            # Cari file las pertama di dalam folder untuk dijadikan preview 3D
+            las_files = [f for f in os.listdir(folder) if f.lower().endswith(('.las', '.laz'))]
+            if las_files:
+                first_file = os.path.join(folder, las_files[0])
+                self.log_console.append(f"Found {len(las_files)} point cloud files. Previewing first file...")
+                self.process_and_render_las(first_file, self.viewer_rgb, is_classification=False)
+            else:
+                self.log_console.append("Warning: Tidak ada file .las atau .laz di dalam folder tersebut.")
 
     def select_output_file(self):
         directory = QFileDialog.getExistingDirectory(self, "Select Output Directory")
@@ -393,22 +453,34 @@ class PointCloudClassificationGUI(QWidget):
 
     def start_process(self):
         model = self.model_path.text()
-        point_cloud = self.pointcloud_path.text()
+        input_path = self.pointcloud_path.text()
         output_dir = self.output_path.text()
 
-        if not model or not point_cloud or not output_dir:
+        if not model or not input_path or not output_dir:
             self.log_console.append("Error: Please fill all required fields")
             return
+            
+        # Tentukan apakah input berupa file tunggal atau list file dari folder
+        target_files = []
+        if os.path.isfile(input_path):
+            target_files.append(input_path)
+        elif os.path.isdir(input_path):
+            target_files = [os.path.join(input_path, f) for f in os.listdir(input_path) if f.lower().endswith(('.las', '.laz'))]
+            if not target_files:
+                self.log_console.append("Error: Folder kosong, tidak ada file .las/.laz untuk diproses.")
+                return
 
         self.start_btn.setEnabled(False)
         self.progress_bar.setMaximum(0)  
-        self.log_console.append("== Classification Process Start! ==")
+        self.log_console.append(f"== Batch Classification Process Start! ({len(target_files)} Files) ==")
 
         batch_size = self.batch_size.value()
         
-        self.process_thread = ProcessThread(point_cloud, model, output_dir, batch_size)
+        # Kirim list of files (target_files) ke dalam Thread
+        self.process_thread = ProcessThread(target_files, model, output_dir, batch_size)
         self.process_thread.output_signal.connect(self.update_console_log)
         self.process_thread.finished_signal.connect(self.process_finished)
+        self.process_thread.progress_signal.connect(self.update_progress_bar)
         self.process_thread.start()
 
     def process_finished(self, success):
@@ -419,16 +491,33 @@ class PointCloudClassificationGUI(QWidget):
         if success:
             QMessageBox.information(self, "Process Complete", "Point cloud data has been classified successfully.")
             
-            # Format output yang menyertakan akhiran _classified
-            filename = os.path.basename(self.pointcloud_path.text())
-            name, ext = os.path.splitext(filename)
-            classified_filename = f"{name}_classified{ext}"
-            possible_output = os.path.join(self.output_path.text(), classified_filename)
+            input_path = self.pointcloud_path.text()
+            output_dir = self.output_path.text()
             
-            if os.path.exists(possible_output):
-                self.process_and_render_las(possible_output, self.viewer_cls, is_classification=True)
+            # Tentukan file mana yang akan dirender (jika folder, ambil file pertama)
+            first_file_to_render = None
+            
+            if os.path.isfile(input_path):
+                first_file_to_render = input_path
+            elif os.path.isdir(input_path):
+                las_files = [f for f in os.listdir(input_path) if f.lower().endswith(('.las', '.laz'))]
+                if las_files:
+                    first_file_to_render = os.path.join(input_path, las_files[0])
+            
+            if first_file_to_render:
+                filename = os.path.basename(first_file_to_render)
+                name, ext = os.path.splitext(filename)
+                classified_filename = f"{name}_classified{ext}"
+                possible_output = os.path.join(output_dir, classified_filename)
+                
+                if os.path.exists(possible_output):
+                    self.log_console.append(f"Merender hasil klasifikasi pertama: {classified_filename}")
+                    self.process_and_render_las(possible_output, self.viewer_cls, is_classification=True)
+                else:
+                    self.log_console.append(f"Warning: File hasil klasifikasi {classified_filename} tidak ditemukan untuk di-render.")
             else:
-                self.log_console.append(f"Warning: File hasil klasifikasi {classified_filename} tidak ditemukan untuk di-render.")
+                self.log_console.append("Warning: Tidak ada file valid untuk dirender pada tab hasil klasifikasi.")
+                
         else:
             QMessageBox.warning(self, "Process Failed", "Point cloud data failed to classify.")
     
@@ -549,8 +638,10 @@ if __name__ == '__main__':
         QProgressBar {
             border: 1px solid #ced4da;
             border-radius: 4px;
-            text-align: center;
-            height: 12px;
+            text-align: center;     
+            height: 22px;            
+            color: #212529;          
+            font-weight: bold;       
         }
         QProgressBar::chunk {
             background-color: #007bff;
