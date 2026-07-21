@@ -1,0 +1,563 @@
+import sys
+import subprocess
+import numpy as np
+import os
+try:
+    import laspy
+except ImportError:
+    laspy = None
+
+from PyQt6.QtWidgets import (QApplication, QWidget, QPushButton, QVBoxLayout, 
+                             QFileDialog, QTextEdit, QLabel, QHBoxLayout, QLineEdit, 
+                             QSpinBox, QProgressBar, QMessageBox, QGroupBox, 
+                             QSplitter, QTabWidget)
+from PyQt6.QtCore import QThread, pyqtSignal, Qt
+from PyQt6.QtGui import QIcon, QPixmap, QCursor
+import pyqtgraph.opengl as gl
+
+
+class ProcessThread(QThread):
+    output_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal(bool)
+
+    def __init__(self, point_cloud, model, output_dir, batch_size):
+        super().__init__()
+        self.point_cloud = point_cloud
+        self.model = model
+        self.output_dir = output_dir
+        self.batch_size = batch_size
+
+    def run(self):
+        try:
+            command = [
+                'python', "scripts/predict_rgb.py",
+                '--batch_size', str(int(self.batch_size)),
+                '--model', self.model,
+                '--point_cloud', self.point_cloud,
+                '--output_dir', self.output_dir
+            ]
+            
+            self.output_signal.emit(f"Running Command: {' '.join(command)}")
+
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+
+            for line in process.stdout:
+                self.output_signal.emit(line.strip())
+            for line in process.stderr:
+                self.output_signal.emit(f"Error: {line.strip()}")
+
+            process.stdout.close()
+            process.stderr.close()
+            return_code = process.wait()
+
+            self.finished_signal.emit(return_code == 0)
+        
+        except Exception as e:
+            self.output_signal.emit(f"Error: {str(e)}")
+            self.finished_signal.emit(False)
+
+
+# --- WIDGET VIEWER 3D CUSTOM ---
+class PointCloudViewer(QWidget):
+    """Widget kustom untuk menampung View 3D utama, sumbu di pojok, dan tombol reset."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        
+        # 1. Main View 3D
+        self.view = gl.GLViewWidget()
+        self.view.setBackgroundColor('k') # Background Hitam (atau ubah 'w' untuk putih)
+        
+        self.scatter = gl.GLScatterPlotItem()
+        # [SOLUSI 2] Tambahkan baris ini agar warna point cloud tidak menumpuk jadi putih
+        self.scatter.setGLOptions('opaque') 
+        self.view.addItem(self.scatter)
+        self.layout.addWidget(self.view)
+        
+        # 2. Overlay Sumbu XYZ Kustom (Kiri Atas)
+        self.axis_view = gl.GLViewWidget(self.view)
+        
+        # Set warna background RGBA dengan Alpha = 0
+        self.axis_view.setBackgroundColor((0, 0, 0, 0))
+        
+        # ---------------------------------------------------------
+        # KUNCI TRANSPARANSI OPENGL WIDGET DI PYQT6
+        # ---------------------------------------------------------
+        self.axis_view.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.axis_view.setAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop, True)
+        # ---------------------------------------------------------
+
+        self.axis_view.mousePressEvent = lambda ev: None
+        self.axis_view.mouseMoveEvent = lambda ev: None
+        self.axis_view.wheelEvent = lambda ev: None
+        
+        # Membuat sumbu XYZ manual agar warna kontras dan tebal
+        axis_size = 15
+        x_axis = gl.GLLinePlotItem(pos=np.array([[0,0,0], [axis_size,0,0]]), color=(1,0.2,0.2,1), width=4, antialias=True) # Merah Terang
+        y_axis = gl.GLLinePlotItem(pos=np.array([[0,0,0], [0,axis_size,0]]), color=(0.2,1,0.2,1), width=4, antialias=True) # Hijau Terang
+        z_axis = gl.GLLinePlotItem(pos=np.array([[0,0,0], [0,0,axis_size]]), color=(0.3,0.3,1,1), width=4, antialias=True) # Biru Terang
+        
+        self.axis_view.addItem(x_axis)
+        self.axis_view.addItem(y_axis)
+        self.axis_view.addItem(z_axis)
+        
+        # Sinkronisasi rotasi kamera
+        self.original_mouseMove = self.view.mouseMoveEvent
+        def custom_mouseMove(ev):
+            self.original_mouseMove(ev)
+            self.axis_view.setCameraPosition(
+                elevation=self.view.opts['elevation'],
+                azimuth=self.view.opts['azimuth']
+            )
+        self.view.mouseMoveEvent = custom_mouseMove
+        
+        # 3. Tombol Reset View
+        self.reset_btn = QPushButton("Reset View", self.view)
+        self.reset_btn.setObjectName("resetBtn")
+        self.reset_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.reset_btn.clicked.connect(self.reset_camera)
+        
+        self.default_distance = 100
+
+    def reset_camera(self):
+        self.view.setCameraPosition(distance=self.default_distance, elevation=30, azimuth=45)
+        self.axis_view.setCameraPosition(distance=40, elevation=30, azimuth=45)
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self.axis_view.setGeometry(10, 10, 120, 120)
+        btn_width, btn_height = 100, 30
+        self.reset_btn.setGeometry(self.width() - btn_width - 20, 20, btn_width, btn_height)
+
+    def load_data(self, points, colors):
+        self.scatter.setData(pos=points, color=colors, size=3, pxMode=True)
+        
+        # Hitung jarak kamera proporsional dengan Bounding Box point cloud
+        bbox_max = np.max(points, axis=0)
+        bbox_min = np.min(points, axis=0)
+        diagonal = np.linalg.norm(bbox_max - bbox_min)
+        
+        self.default_distance = float(diagonal) * 1.5
+        if self.default_distance < 10: 
+            self.default_distance = 100
+            
+        self.reset_camera()
+        
+    def clear_data(self):
+        self.scatter.setData(pos=np.empty((0,3)))
+
+
+# --- MAIN APPLICATION GUI ---
+class PointCloudClassificationGUI(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.initUI()
+
+    def initUI(self):
+        self.setWindowTitle('Class Point 3D')
+        self.setGeometry(100, 100, 1200, 700)
+        self.setWindowIcon(QIcon("ui/logo.png")) 
+
+        main_layout = QHBoxLayout(self)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        
+        # ==================== LEFT PANEL ====================
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 15, 0)
+
+        # Config Group
+        config_group = QGroupBox("Project Configuration")
+        config_layout = QVBoxLayout()
+
+        self.pointcloud_label = QLabel('Point Cloud Input (.las):')
+        self.pointcloud_path = QLineEdit(self)
+        self.pointcloud_path.setReadOnly(True)
+        self.pointcloud_path.setPlaceholderText("Select LAS file...")
+        self.pointcloud_btn = QPushButton('Browse...')
+        self.pointcloud_btn.clicked.connect(self.select_pointcloud)
+        pc_layout = QHBoxLayout()
+        pc_layout.addWidget(self.pointcloud_path)
+        pc_layout.addWidget(self.pointcloud_btn)
+        config_layout.addWidget(self.pointcloud_label)
+        config_layout.addLayout(pc_layout)
+
+        self.model_label = QLabel('Deep Learning Model (.t7):')
+        self.model_path = QLineEdit(self)
+        self.model_path.setReadOnly(True)
+        self.model_path.setPlaceholderText("Select model file...")
+        self.model_btn = QPushButton('Browse...')
+        self.model_btn.clicked.connect(self.select_model)
+        model_layout = QHBoxLayout()
+        model_layout.addWidget(self.model_path)
+        model_layout.addWidget(self.model_btn)
+        config_layout.addWidget(self.model_label)
+        config_layout.addLayout(model_layout)
+
+        self.output_label = QLabel('Output Directory:')
+        self.output_path = QLineEdit(self)
+        self.output_path.setReadOnly(True)
+        self.output_path.setPlaceholderText("Select output folder...")
+        self.output_btn = QPushButton('Browse...')
+        self.output_btn.clicked.connect(self.select_output_file)
+        out_layout = QHBoxLayout()
+        out_layout.addWidget(self.output_path)
+        out_layout.addWidget(self.output_btn)
+        config_layout.addWidget(self.output_label)
+        config_layout.addLayout(out_layout)
+
+        config_group.setLayout(config_layout)
+        left_layout.addWidget(config_group)
+
+        # Advanced Options Group
+        adv_group = QGroupBox("Advanced Options")
+        adv_layout = QVBoxLayout()
+        self.advanced_options_btn = QPushButton('Show Advanced Options ▼')
+        self.advanced_options_btn.setObjectName("advBtn")
+        self.advanced_options_btn.setCheckable(True)
+        self.advanced_options_btn.clicked.connect(self.toggle_advanced_options)
+        
+        self.batch_size_label = QLabel('Batch Size (Inference):')
+        self.batch_size = QSpinBox(self)
+        self.batch_size.setRange(1, 1024)
+        self.batch_size.setValue(16)
+        self.batch_size.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        self.adv_content = QWidget()
+        adv_content_layout = QHBoxLayout(self.adv_content)
+        adv_content_layout.setContentsMargins(0, 10, 0, 0)
+        adv_content_layout.addWidget(self.batch_size_label)
+        adv_content_layout.addWidget(self.batch_size)
+        adv_content_layout.addStretch()
+        self.adv_content.setVisible(False)
+
+        adv_layout.addWidget(self.advanced_options_btn)
+        adv_layout.addWidget(self.adv_content)
+        adv_group.setLayout(adv_layout)
+        left_layout.addWidget(adv_group)
+
+        # Execution Group
+        exec_layout = QHBoxLayout()
+        self.start_btn = QPushButton('Start Classification', self)
+        self.start_btn.setObjectName("startBtn")
+        self.start_btn.setMinimumHeight(45)
+        self.start_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.start_btn.clicked.connect(self.start_process)
+
+        self.replay_btn = QPushButton(' Clear')
+        self.replay_btn.setObjectName("clearBtn")
+        self.replay_btn.setIcon(QIcon("ui/replay.png")) 
+        self.replay_btn.setMinimumHeight(45)
+        self.replay_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.replay_btn.clicked.connect(self.clear_inputs)
+
+        exec_layout.addWidget(self.start_btn, stretch=3)
+        exec_layout.addWidget(self.replay_btn, stretch=1)
+        left_layout.addLayout(exec_layout)
+
+        # Status Group
+        status_group = QGroupBox("Processing Status")
+        status_layout = QVBoxLayout()
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(False)
+        self.log_console = QTextEdit(self)
+        self.log_console.setReadOnly(True)
+        self.log_console.setStyleSheet("background-color: #f8f9fa; border: 1px solid #ced4da; font-family: Consolas;")
+        status_layout.addWidget(self.progress_bar)
+        status_layout.addWidget(self.log_console)
+        status_group.setLayout(status_layout)
+        left_layout.addWidget(status_group)
+
+        # Watermark
+        watermark_layout = QHBoxLayout()
+        watermark_logo = QLabel(self)
+        watermark_logo.setPixmap(QPixmap("ui/ugm.png").scaled(40, 40, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        watermark_layout.addWidget(watermark_logo)
+        watermark_text = QLabel("Department of Geodetic Engineering\nFaculty of Engineering Universitas Gadjah Mada")
+        watermark_text.setStyleSheet("color: gray; font-size: 10px;")
+        watermark_layout.addWidget(watermark_text)
+        watermark_layout.addStretch(1)
+        left_layout.addLayout(watermark_layout)
+
+        # ==================== RIGHT PANEL ====================
+        right_panel = QTabWidget()
+        
+        self.viewer_rgb = PointCloudViewer()
+        self.viewer_cls = PointCloudViewer()
+
+        right_panel.addTab(self.viewer_rgb, "Input Point Cloud (RGB)")
+        right_panel.addTab(self.viewer_cls, "Classification Result")
+
+        splitter.addWidget(left_panel)
+        splitter.addWidget(right_panel)
+        splitter.setSizes([400, 800])
+        main_layout.addWidget(splitter)
+
+    def toggle_advanced_options(self):
+        is_checked = self.advanced_options_btn.isChecked()
+        self.adv_content.setVisible(is_checked)
+        self.advanced_options_btn.setText('Show Advanced Options ▲' if is_checked else 'Show Advanced Options ▼')
+
+    def select_model(self):
+        model, _ = QFileDialog.getOpenFileName(self, "Select Model", "", "Model Files (*.t7)")
+        if model:
+            self.model_path.setText(model)
+            self.log_console.append(f"Selected Model: {model}")
+
+    def select_pointcloud(self):
+        pointcloud, _ = QFileDialog.getOpenFileName(self, "Select Point Cloud (*.las)", "", "LAS Files (*.las)")
+        if pointcloud:
+            self.pointcloud_path.setText(pointcloud)
+            self.log_console.append(f"Selected Point Cloud: {pointcloud}")
+            self.process_and_render_las(pointcloud, self.viewer_rgb, is_classification=False) 
+
+    def select_output_file(self):
+        directory = QFileDialog.getExistingDirectory(self, "Select Output Directory")
+        if directory:
+            self.output_path.setText(directory)
+            self.log_console.append(f"Selected Output Directory: {directory}")
+
+    def process_and_render_las(self, filepath, viewer, is_classification=False):
+        if laspy is None:
+            self.log_console.append("Warning: Modul 'laspy' tidak ditemukan. Preview 3D dilewati.")
+            return
+
+        try:
+            las = laspy.read(filepath)
+            points = np.vstack((las.x, las.y, las.z)).transpose()
+            
+            has_rgb = hasattr(las, 'red') and np.max(las.red) > 0
+            has_cls = hasattr(las, 'classification')
+
+            # Sub-sampling
+            max_points = 100000
+            if len(points) > max_points:
+                indices = np.random.choice(len(points), max_points, replace=False)
+                points = points[indices]
+                if is_classification and has_cls:
+                    class_vals = np.array(las.classification)[indices]
+                elif has_rgb and not is_classification:
+                    colors_raw = np.vstack((las.red[indices], las.green[indices], las.blue[indices])).transpose()
+            else:
+                if is_classification and has_cls:
+                    class_vals = np.array(las.classification)
+                elif has_rgb and not is_classification:
+                    colors_raw = np.vstack((las.red, las.green, las.blue)).transpose()
+
+            # Matriks pewarnaan awal
+            colors_matrix = None
+
+            # Pewarnaan khusus Klasifikasi (Color Map)
+            if is_classification and has_cls:
+                unique_classes = np.unique(class_vals)
+                colors_matrix = np.zeros((len(class_vals), 4))
+                
+                # Palet warna klasifikasi tutupan lahan standar (Bangunan=Merah, Pohon=Hijau, dll)
+                cmap = {
+                    2: (0.6, 0.4, 0.2, 1.0), # Ground
+                    3: (0.0, 0.9, 0.0, 1.0), # Low Veg
+                    4: (0.0, 0.7, 0.0, 1.0), # Med Veg
+                    5: (0.0, 0.4, 0.0, 1.0), # High Veg
+                    6: (0.9, 0.1, 0.1, 1.0), # Building
+                    9: (0.0, 0.0, 0.9, 1.0), # Water
+                }
+                for cls in unique_classes:
+                    if cls in cmap:
+                        colors_matrix[class_vals == cls] = cmap[cls]
+                    else:
+                        np.random.seed(cls)
+                        colors_matrix[class_vals == cls] = (np.random.rand(), np.random.rand(), np.random.rand(), 1.0)
+
+            # Pewarnaan RGB biasa
+            elif has_rgb and not is_classification:
+                if colors_raw.max() > 255: colors_raw = colors_raw / 65535.0
+                else: colors_raw = colors_raw / 255.0
+                alpha = np.ones((colors_raw.shape[0], 1))
+                colors_matrix = np.hstack((colors_raw, alpha))
+
+            # Jika tidak ada RGB maupun Kelas, isi dengan matriks abu-abu solid (Mencegah hilang di view)
+            if colors_matrix is None:
+                colors_matrix = np.ones((len(points), 4)) * np.array([0.4, 0.4, 0.4, 1.0])
+
+            # Memusatkan Point Cloud (Sangat penting agar kamera berotasi di tengah)
+            centroid = np.mean(points, axis=0)
+            points -= centroid
+
+            viewer.load_data(points, colors_matrix)
+            self.log_console.append(f"Berhasil merender previu 3D: {os.path.basename(filepath)}")
+
+        except Exception as e:
+            self.log_console.append(f"Gagal memuat previu 3D: {str(e)}")
+
+    def start_process(self):
+        model = self.model_path.text()
+        point_cloud = self.pointcloud_path.text()
+        output_dir = self.output_path.text()
+
+        if not model or not point_cloud or not output_dir:
+            self.log_console.append("Error: Please fill all required fields")
+            return
+
+        self.start_btn.setEnabled(False)
+        self.progress_bar.setMaximum(0)  
+        self.log_console.append("== Classification Process Start! ==")
+
+        batch_size = self.batch_size.value()
+        
+        self.process_thread = ProcessThread(point_cloud, model, output_dir, batch_size)
+        self.process_thread.output_signal.connect(self.update_console_log)
+        self.process_thread.finished_signal.connect(self.process_finished)
+        self.process_thread.start()
+
+    def process_finished(self, success):
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setValue(100 if success else 0)
+        self.start_btn.setEnabled(True)
+
+        if success:
+            QMessageBox.information(self, "Process Complete", "Point cloud data has been classified successfully.")
+            
+            # Format output yang menyertakan akhiran _classified
+            filename = os.path.basename(self.pointcloud_path.text())
+            name, ext = os.path.splitext(filename)
+            classified_filename = f"{name}_classified{ext}"
+            possible_output = os.path.join(self.output_path.text(), classified_filename)
+            
+            if os.path.exists(possible_output):
+                self.process_and_render_las(possible_output, self.viewer_cls, is_classification=True)
+            else:
+                self.log_console.append(f"Warning: File hasil klasifikasi {classified_filename} tidak ditemukan untuk di-render.")
+        else:
+            QMessageBox.warning(self, "Process Failed", "Point cloud data failed to classify.")
+    
+    def update_console_log(self, message):
+        self.log_console.append(message)
+        scrollbar = self.log_console.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def clear_inputs(self):
+        self.model_path.clear()
+        self.pointcloud_path.clear()
+        self.output_path.clear()
+        self.log_console.clear()
+        self.progress_bar.setValue(0)
+        
+        self.viewer_rgb.clear_data()
+        self.viewer_cls.clear_data()
+
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    
+    app.setStyleSheet("""
+        QWidget {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            font-size: 13px;
+        }
+        QGroupBox {
+            font-weight: bold;
+            border: 1px solid #ced4da;
+            border-radius: 6px;
+            margin-top: 15px;
+            padding-top: 15px;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            subcontrol-position: top left;
+            left: 10px;
+            padding: 0 5px;
+            color: #495057;
+        }
+        QLineEdit {
+            background-color: #ffffff;
+            padding: 6px;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+            color: #495057;
+        }
+        QSpinBox {
+            padding: 5px;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+            background-color: #ffffff;
+            width: 70px;
+        }
+        QPushButton {
+            background-color: #f8f9fa;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+            padding: 6px 12px;
+            color: #495057;
+            font-weight: 500;
+        }
+        QPushButton:hover {
+            background-color: #e2e6ea;
+            border: 1px solid #dae0e5;
+        }
+        QPushButton:pressed {
+            background-color: #dae0e5;
+        }
+        QPushButton#startBtn {
+            background-color: #28a745;
+            color: white;
+            border: 1px solid #28a745;
+            font-weight: bold;
+            font-size: 14px;
+        }
+        QPushButton#startBtn:hover {
+            background-color: #218838;
+            border: 1px solid #1e7e34;
+        }
+        QPushButton#startBtn:disabled {
+            background-color: #94d3a2;
+            border: 1px solid #94d3a2;
+        }
+        QPushButton#clearBtn {
+            background-color: #ffffff;
+            color: #dc3545;
+            border: 1px solid #dc3545;
+            font-weight: bold;
+        }
+        QPushButton#clearBtn:hover {
+            background-color: #dc3545;
+            color: white;
+        }
+        QPushButton#advBtn {
+            background-color: transparent;
+            border: none;
+            color: #007bff;
+            text-align: left;
+            padding: 0px;
+        }
+        QPushButton#advBtn:hover {
+            color: #0056b3;
+            text-decoration: underline;
+        }
+        QPushButton#resetBtn {
+            background-color: rgba(255, 255, 255, 220);
+            border: 1px solid #adb5bd;
+            border-radius: 12px;
+            color: #343a40;
+            font-size: 11px;
+            font-weight: bold;
+        }
+        QPushButton#resetBtn:hover {
+            background-color: rgba(230, 230, 230, 255);
+        }
+        QProgressBar {
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+            text-align: center;
+            height: 12px;
+        }
+        QProgressBar::chunk {
+            background-color: #007bff;
+            border-radius: 3px;
+        }
+    """)
+
+    ex = PointCloudClassificationGUI()
+    ex.show()
+    sys.exit(app.exec())
