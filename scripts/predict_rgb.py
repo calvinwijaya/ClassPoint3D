@@ -154,7 +154,7 @@ if __name__ == '__main__':
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
     
    # 1. BACA & SPLIT DATA LANGSUNG DI RAM
-    print("Mempersiapkan data dan membuat blok memori sementara...", flush=True)
+    print("Preparing data and creating temporary block...", flush=True)
     data = read_las(args.point_cloud)
     xy_min = np.amin(data, axis=0)[0:2]
     data[:, 0:2] -= xy_min
@@ -166,7 +166,7 @@ if __name__ == '__main__':
     blocks = split_array(data, num_blocks_x, num_blocks_y, args.block_size)
     
     # 2. LOAD MODEL HANYA SEKALI DI SINI
-    print("Memuat Model DGCNN ke GPU...", flush=True)
+    print("Load DGCNN model to GPU...", flush=True)
     classifier = dgcnn_sem_seg(args).cuda()
     classifier = nn.DataParallel(classifier)
     checkpoint = torch.load(args.model, weights_only=True, mmap=True)
@@ -174,7 +174,7 @@ if __name__ == '__main__':
     classifier = classifier.eval()
     
     # 3. PROSES INFERENCE (Super Cepat)
-    print("Memulai klasifikasi...", flush=True)
+    print("Start Classification...", flush=True)
     all_results = []
     total_areas = len(blocks)
     
@@ -191,7 +191,7 @@ if __name__ == '__main__':
         print(f"PROGRESS:{idx + 1}/{total_areas}", flush=True)
         
     # 4. GABUNGKAN DATA & EXPORT .LAS SEKALI SAJA
-    print("Menggabungkan hasil klasifikasi dan mengekspor file LAS...")
+    print("Merge classification resolt and export the result...")
     if all_results:
         # Menyatukan seluruh blok yang ada di memori menggunakan numpy
         final_point_cloud = np.vstack(all_results)
@@ -202,9 +202,9 @@ if __name__ == '__main__':
         
         # Simpan satu kali langsung jadi utuh
         save_las(final_point_cloud, out_las)
-        print(f"File berhasil disimpan di: {out_las}")
+        print(f"Classified point cloud saved in: {out_las}")
     else:
-        print("Peringatan: Tidak ada blok data valid yang diproses.")
+        print("Warning: No valid block can be processed.")
 
     # 5. CLEAN UP FOLDER SEMENTARA
     # shutil.rmtree(data_dir, ignore_errors=True)

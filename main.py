@@ -10,7 +10,7 @@ except ImportError:
 from PyQt6.QtWidgets import (QApplication, QWidget, QPushButton, QVBoxLayout, 
                              QFileDialog, QTextEdit, QLabel, QHBoxLayout, QLineEdit, 
                              QSpinBox, QProgressBar, QMessageBox, QGroupBox, 
-                             QSplitter, QTabWidget)
+                             QSplitter, QTabWidget, QComboBox) # <-- Tambahan QComboBox
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 from PyQt6.QtGui import QIcon, QPixmap, QCursor
 import pyqtgraph.opengl as gl
@@ -21,13 +21,14 @@ class ProcessThread(QThread):
     finished_signal = pyqtSignal(bool)
     progress_signal = pyqtSignal(int)
 
-    def __init__(self, point_clouds, model, output_dir, batch_size):
+    # Tambahkan parameter script_path
+    def __init__(self, point_clouds, model, output_dir, batch_size, script_path):
         super().__init__()
-        # point_clouds sekarang berupa list of file paths
         self.point_clouds = point_clouds 
         self.model = model
         self.output_dir = output_dir
         self.batch_size = batch_size
+        self.script_path = script_path # Menampung script yang dipilih (DGCNN atau XGBoost)
 
     def run(self):
         try:
@@ -36,11 +37,12 @@ class ProcessThread(QThread):
             for file_idx, point_cloud_file in enumerate(self.point_clouds):
                 filename = os.path.basename(point_cloud_file)
                 self.output_signal.emit(f"\n========================================")
-                self.output_signal.emit(f"Memproses File [{file_idx + 1}/{total_files}]: {filename}")
+                self.output_signal.emit(f"Processing File [{file_idx + 1}/{total_files}]: {filename}")
                 self.output_signal.emit(f"========================================\n")
                 
+                # Gunakan self.script_path yang dinamis
                 command = [
-                    'python', "scripts/predict_rgb.py",
+                    'python', self.script_path,
                     '--batch_size', str(int(self.batch_size)),
                     '--model', self.model,
                     '--point_cloud', point_cloud_file,
@@ -74,13 +76,11 @@ class ProcessThread(QThread):
                 process.stderr.close()
                 return_code = process.wait()
                 
-                # Jika ada satu file yang gagal (return code != 0), hentikan proses
                 if return_code != 0:
                     self.output_signal.emit(f"Proses terhenti karena error pada file: {filename}")
                     self.finished_signal.emit(False)
                     return
 
-            # Jika looping selesai untuk semua file
             self.finished_signal.emit(True)
         
         except Exception as e:
@@ -95,44 +95,33 @@ class PointCloudViewer(QWidget):
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
         
-        # 1. Main View 3D
         self.view = gl.GLViewWidget()
-        self.view.setBackgroundColor('k') # Background Hitam (atau ubah 'w' untuk putih)
+        self.view.setBackgroundColor('k')
         
         self.scatter = gl.GLScatterPlotItem()
-        # [SOLUSI 2] Tambahkan baris ini agar warna point cloud tidak menumpuk jadi putih
         self.scatter.setGLOptions('opaque') 
         self.view.addItem(self.scatter)
         self.layout.addWidget(self.view)
         
-        # 2. Overlay Sumbu XYZ Kustom (Kiri Atas)
         self.axis_view = gl.GLViewWidget(self.view)
-        
-        # Set warna background RGBA dengan Alpha = 0
         self.axis_view.setBackgroundColor((0, 0, 0, 0))
         
-        # ---------------------------------------------------------
-        # KUNCI TRANSPARANSI OPENGL WIDGET DI PYQT6
-        # ---------------------------------------------------------
         self.axis_view.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.axis_view.setAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop, True)
-        # ---------------------------------------------------------
-
+        
         self.axis_view.mousePressEvent = lambda ev: None
         self.axis_view.mouseMoveEvent = lambda ev: None
         self.axis_view.wheelEvent = lambda ev: None
         
-        # Membuat sumbu XYZ manual agar warna kontras dan tebal
         axis_size = 15
-        x_axis = gl.GLLinePlotItem(pos=np.array([[0,0,0], [axis_size,0,0]]), color=(1,0.2,0.2,1), width=4, antialias=True) # Merah Terang
-        y_axis = gl.GLLinePlotItem(pos=np.array([[0,0,0], [0,axis_size,0]]), color=(0.2,1,0.2,1), width=4, antialias=True) # Hijau Terang
-        z_axis = gl.GLLinePlotItem(pos=np.array([[0,0,0], [0,0,axis_size]]), color=(0.3,0.3,1,1), width=4, antialias=True) # Biru Terang
+        x_axis = gl.GLLinePlotItem(pos=np.array([[0,0,0], [axis_size,0,0]]), color=(1,0.2,0.2,1), width=4, antialias=True) 
+        y_axis = gl.GLLinePlotItem(pos=np.array([[0,0,0], [0,axis_size,0]]), color=(0.2,1,0.2,1), width=4, antialias=True) 
+        z_axis = gl.GLLinePlotItem(pos=np.array([[0,0,0], [0,0,axis_size]]), color=(0.3,0.3,1,1), width=4, antialias=True) 
         
         self.axis_view.addItem(x_axis)
         self.axis_view.addItem(y_axis)
         self.axis_view.addItem(z_axis)
         
-        # Sinkronisasi rotasi kamera
         self.original_mouseMove = self.view.mouseMoveEvent
         def custom_mouseMove(ev):
             self.original_mouseMove(ev)
@@ -142,7 +131,6 @@ class PointCloudViewer(QWidget):
             )
         self.view.mouseMoveEvent = custom_mouseMove
         
-        # 3. Tombol Reset View
         self.reset_btn = QPushButton("Reset View", self.view)
         self.reset_btn.setObjectName("resetBtn")
         self.reset_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -163,7 +151,6 @@ class PointCloudViewer(QWidget):
     def load_data(self, points, colors):
         self.scatter.setData(pos=points, color=colors, size=3, pxMode=True)
         
-        # Hitung jarak kamera proporsional dengan Bounding Box point cloud
         bbox_max = np.max(points, axis=0)
         bbox_min = np.min(points, axis=0)
         diagonal = np.linalg.norm(bbox_max - bbox_min)
@@ -201,11 +188,21 @@ class PointCloudClassificationGUI(QWidget):
         config_group = QGroupBox("Project Configuration")
         config_layout = QVBoxLayout()
 
-        # --- BLOK POINT CLOUD INPUT (UBAH BAGIAN INI DI DALAM initUI) ---
-        self.pointcloud_label = QLabel('Point Cloud Input (File .las atau Folder):')
+        # -------------------------------------------------------------
+        # BARU: Dropdown Pemilihan Algoritma
+        # -------------------------------------------------------------
+        self.algo_label = QLabel('Classification Algorithm:')
+        self.algo_combo = QComboBox(self)
+        self.algo_combo.addItems(["Deep Learning (DGCNN)", "Machine Learning (XGBoost)"])
+        config_layout.addWidget(self.algo_label)
+        config_layout.addWidget(self.algo_combo)
+        # -------------------------------------------------------------
+
+        # Point Cloud Input
+        self.pointcloud_label = QLabel('Point Cloud Input (.las/.laz file or Folder):')
         self.pointcloud_path = QLineEdit(self)
         self.pointcloud_path.setReadOnly(True)
-        self.pointcloud_path.setPlaceholderText("Select single LAS file OR folder...")
+        self.pointcloud_path.setPlaceholderText("Select single las or laz file OR folder...")
         
         self.pointcloud_file_btn = QPushButton('Select File')
         self.pointcloud_file_btn.clicked.connect(self.select_pointcloud_file)
@@ -216,12 +213,12 @@ class PointCloudClassificationGUI(QWidget):
         pc_layout = QHBoxLayout()
         pc_layout.addWidget(self.pointcloud_path)
         pc_layout.addWidget(self.pointcloud_file_btn)
-        pc_layout.addWidget(self.pointcloud_folder_btn)  # Tombol baru ditambahkan ke layout
+        pc_layout.addWidget(self.pointcloud_folder_btn)  
         config_layout.addWidget(self.pointcloud_label)
         config_layout.addLayout(pc_layout)
-        # -------------------------------------------------------------
         
-        self.model_label = QLabel('Deep Learning Model (.t7):')
+        # Model Input
+        self.model_label = QLabel('Trained Model File (.t7 / .pkl):')
         self.model_path = QLineEdit(self)
         self.model_path.setReadOnly(True)
         self.model_path.setPlaceholderText("Select model file...")
@@ -233,6 +230,7 @@ class PointCloudClassificationGUI(QWidget):
         config_layout.addWidget(self.model_label)
         config_layout.addLayout(model_layout)
 
+        # Output Dir
         self.output_label = QLabel('Output Directory:')
         self.output_path = QLineEdit(self)
         self.output_path.setReadOnly(True)
@@ -256,7 +254,7 @@ class PointCloudClassificationGUI(QWidget):
         self.advanced_options_btn.setCheckable(True)
         self.advanced_options_btn.clicked.connect(self.toggle_advanced_options)
         
-        self.batch_size_label = QLabel('Batch Size (Inference):')
+        self.batch_size_label = QLabel('Batch Size (For Deep Learning):')
         self.batch_size = QSpinBox(self)
         self.batch_size.setRange(1, 1024)
         self.batch_size.setValue(16)
@@ -300,7 +298,7 @@ class PointCloudClassificationGUI(QWidget):
         self.progress_bar = QProgressBar(self)
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(True)
-        self.progress_bar.setFormat("Memproses Klasifikasi... %p%")
+        self.progress_bar.setFormat("Process Classification... %p%")
         self.log_console = QTextEdit(self)
         self.log_console.setReadOnly(True)
         self.log_console.setStyleSheet("background-color: #f8f9fa; border: 1px solid #ced4da; font-family: Consolas;")
@@ -346,7 +344,8 @@ class PointCloudClassificationGUI(QWidget):
         self.advanced_options_btn.setText('Show Advanced Options ▲' if is_checked else 'Show Advanced Options ▼')
 
     def select_model(self):
-        model, _ = QFileDialog.getOpenFileName(self, "Select Model", "", "Model Files (*.t7)")
+        # PERUBAHAN: Memperbolehkan ekstensi .t7 (DGCNN) atau .pkl (XGBoost)
+        model, _ = QFileDialog.getOpenFileName(self, "Select Model", "", "Model Files (*.t7 *.pkl)")
         if model:
             self.model_path.setText(model)
             self.log_console.append(f"Selected Model: {model}")
@@ -364,14 +363,13 @@ class PointCloudClassificationGUI(QWidget):
             self.pointcloud_path.setText(folder)
             self.log_console.append(f"Selected Folder for Batch Processing: {folder}")
             
-            # Cari file las pertama di dalam folder untuk dijadikan preview 3D
             las_files = [f for f in os.listdir(folder) if f.lower().endswith(('.las', '.laz'))]
             if las_files:
                 first_file = os.path.join(folder, las_files[0])
                 self.log_console.append(f"Found {len(las_files)} point cloud files. Previewing first file...")
                 self.process_and_render_las(first_file, self.viewer_rgb, is_classification=False)
             else:
-                self.log_console.append("Warning: Tidak ada file .las atau .laz di dalam folder tersebut.")
+                self.log_console.append("Warning: No .las or .laz file found in the folder.")
 
     def select_output_file(self):
         directory = QFileDialog.getExistingDirectory(self, "Select Output Directory")
@@ -391,7 +389,6 @@ class PointCloudClassificationGUI(QWidget):
             has_rgb = hasattr(las, 'red') and np.max(las.red) > 0
             has_cls = hasattr(las, 'classification')
 
-            # Sub-sampling
             max_points = 100000
             if len(points) > max_points:
                 indices = np.random.choice(len(points), max_points, replace=False)
@@ -406,15 +403,12 @@ class PointCloudClassificationGUI(QWidget):
                 elif has_rgb and not is_classification:
                     colors_raw = np.vstack((las.red, las.green, las.blue)).transpose()
 
-            # Matriks pewarnaan awal
             colors_matrix = None
 
-            # Pewarnaan khusus Klasifikasi (Color Map)
             if is_classification and has_cls:
                 unique_classes = np.unique(class_vals)
                 colors_matrix = np.zeros((len(class_vals), 4))
                 
-                # Palet warna klasifikasi tutupan lahan standar (Bangunan=Merah, Pohon=Hijau, dll)
                 cmap = {
                     2: (0.6, 0.4, 0.2, 1.0), # Ground
                     3: (0.0, 0.9, 0.0, 1.0), # Low Veg
@@ -430,26 +424,23 @@ class PointCloudClassificationGUI(QWidget):
                         np.random.seed(cls)
                         colors_matrix[class_vals == cls] = (np.random.rand(), np.random.rand(), np.random.rand(), 1.0)
 
-            # Pewarnaan RGB biasa
             elif has_rgb and not is_classification:
                 if colors_raw.max() > 255: colors_raw = colors_raw / 65535.0
                 else: colors_raw = colors_raw / 255.0
                 alpha = np.ones((colors_raw.shape[0], 1))
                 colors_matrix = np.hstack((colors_raw, alpha))
 
-            # Jika tidak ada RGB maupun Kelas, isi dengan matriks abu-abu solid (Mencegah hilang di view)
             if colors_matrix is None:
                 colors_matrix = np.ones((len(points), 4)) * np.array([0.4, 0.4, 0.4, 1.0])
 
-            # Memusatkan Point Cloud (Sangat penting agar kamera berotasi di tengah)
             centroid = np.mean(points, axis=0)
             points -= centroid
 
             viewer.load_data(points, colors_matrix)
-            self.log_console.append(f"Berhasil merender previu 3D: {os.path.basename(filepath)}")
+            self.log_console.append(f"Successfully rendering 3D preview: {os.path.basename(filepath)}")
 
         except Exception as e:
-            self.log_console.append(f"Gagal memuat previu 3D: {str(e)}")
+            self.log_console.append(f"Fail to load 3D preview: {str(e)}")
 
     def start_process(self):
         model = self.model_path.text()
@@ -460,7 +451,6 @@ class PointCloudClassificationGUI(QWidget):
             self.log_console.append("Error: Please fill all required fields")
             return
             
-        # Tentukan apakah input berupa file tunggal atau list file dari folder
         target_files = []
         if os.path.isfile(input_path):
             target_files.append(input_path)
@@ -470,14 +460,24 @@ class PointCloudClassificationGUI(QWidget):
                 self.log_console.append("Error: Folder kosong, tidak ada file .las/.laz untuk diproses.")
                 return
 
+        # -------------------------------------------------------------
+        # BARU: Tentukan script mana yang berjalan berdasarkan Dropdown
+        # -------------------------------------------------------------
+        selected_algo = self.algo_combo.currentText()
+        if "Deep Learning" in selected_algo:
+            script_to_run = "scripts/predict_rgb.py"
+        else:
+            script_to_run = "scripts/classify_xgb.py"
+
         self.start_btn.setEnabled(False)
         self.progress_bar.setMaximum(0)  
         self.log_console.append(f"== Batch Classification Process Start! ({len(target_files)} Files) ==")
+        self.log_console.append(f"Using Algorithm: {selected_algo}")
 
         batch_size = self.batch_size.value()
         
-        # Kirim list of files (target_files) ke dalam Thread
-        self.process_thread = ProcessThread(target_files, model, output_dir, batch_size)
+        # Kirim list of files (target_files) dan script_to_run ke dalam Thread
+        self.process_thread = ProcessThread(target_files, model, output_dir, batch_size, script_to_run)
         self.process_thread.output_signal.connect(self.update_console_log)
         self.process_thread.finished_signal.connect(self.process_finished)
         self.process_thread.progress_signal.connect(self.update_progress_bar)
@@ -494,7 +494,6 @@ class PointCloudClassificationGUI(QWidget):
             input_path = self.pointcloud_path.text()
             output_dir = self.output_path.text()
             
-            # Tentukan file mana yang akan dirender (jika folder, ambil file pertama)
             first_file_to_render = None
             
             if os.path.isfile(input_path):
@@ -511,12 +510,12 @@ class PointCloudClassificationGUI(QWidget):
                 possible_output = os.path.join(output_dir, classified_filename)
                 
                 if os.path.exists(possible_output):
-                    self.log_console.append(f"Merender hasil klasifikasi pertama: {classified_filename}")
+                    self.log_console.append(f"Rendering first classification result: {classified_filename}")
                     self.process_and_render_las(possible_output, self.viewer_cls, is_classification=True)
                 else:
-                    self.log_console.append(f"Warning: File hasil klasifikasi {classified_filename} tidak ditemukan untuk di-render.")
+                    self.log_console.append(f"Warning: classification file result {classified_filename} is not found to render.")
             else:
-                self.log_console.append("Warning: Tidak ada file valid untuk dirender pada tab hasil klasifikasi.")
+                self.log_console.append("Warning: No valid file to rendered in classification tab.")
                 
         else:
             QMessageBox.warning(self, "Process Failed", "Point cloud data failed to classify.")
@@ -559,7 +558,7 @@ if __name__ == '__main__':
             padding: 0 5px;
             color: #495057;
         }
-        QLineEdit {
+        QLineEdit, QComboBox { /* <-- Tambahan QComboBox di dalam rule border */
             background-color: #ffffff;
             padding: 6px;
             border: 1px solid #ced4da;
@@ -633,7 +632,7 @@ if __name__ == '__main__':
             font-weight: bold;
         }
         QPushButton#resetBtn:hover {
-            background-color: rgba(230, 230, 230, 255);
+            background-color: rgba(230, 230, 255, 255);
         }
         QProgressBar {
             border: 1px solid #ced4da;
