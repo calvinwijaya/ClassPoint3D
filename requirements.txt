@@ -1,3 +1,4 @@
+--extra-index-url https://download.pytorch.org/whl/cu126
 colorama==0.4.6
 filelock==3.19.1
 fsspec==2025.10.0

@@ -3,7 +3,7 @@ setlocal enabledelayedexpansion
 
 :: ====== CONFIG ======
 set "ENV_NAME=mdgcnn"
-set "PYTHON_VERSION=3.9"
+set "PYTHON_VERSION=3.10"
 set "REQUIREMENTS=requirements.txt"
 set "MAIN_SCRIPT=main.py"
 set "CONDA_PATH=C:\Users\USER\miniconda3\Library\bin\conda.bat"
