@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QPushButton, QVBoxLayout,
                              QSpinBox, QProgressBar, QMessageBox, QGroupBox, 
                              QSplitter, QTabWidget, QComboBox, QCheckBox) # <-- Tambahan QCheckBox
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
-from PyQt6.QtGui import QIcon, QPixmap, QCursor
+from PyQt6.QtGui import QIcon, QPixmap, QCursor, QFont
 import pyqtgraph.opengl as gl
 
 # --- BARU: Custom Checkbox untuk Legend (Mendukung Double Click) ---
@@ -215,7 +215,7 @@ class PointCloudViewer(QWidget):
 
     def toggle_rgb_mode(self):
         is_rgb = self.rgb_toggle_btn.isChecked()
-        self.rgb_toggle_btn.setText("Show Thematic" if is_rgb else "Show RGB")
+        self.rgb_toggle_btn.setText("Show Class" if is_rgb else "Show RGB")
         self.update_filter()
 
     def set_hidden_classes(self, hidden_classes):
@@ -376,7 +376,7 @@ class PointCloudClassificationGUI(QWidget):
         self.progress_bar = QProgressBar(self)
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(True)
-        self.progress_bar.setFormat("Process Classification... %p%")
+        self.progress_bar.setFormat("Classification Process... %p%")
         self.log_console = QTextEdit(self)
         self.log_console.setReadOnly(True)
         self.log_console.setStyleSheet("background-color: #f8f9fa; border: 1px solid #ced4da; font-family: Consolas;")
@@ -384,6 +384,35 @@ class PointCloudClassificationGUI(QWidget):
         status_layout.addWidget(self.log_console)
         status_group.setLayout(status_layout)
         left_layout.addWidget(status_group)
+
+        # ==========================================================
+        # --- UI untuk Export Kelas Spesifik ---
+        # ==========================================================
+        export_group = QGroupBox("Export Specific Class")
+        export_layout = QHBoxLayout()
+        
+        self.export_combo = QComboBox(self)
+        self.export_combo.addItems(["Ground", "Vegetation", "Building"])
+        
+        self.export_btn = QPushButton("Export Specific Class")
+        self.export_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.export_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #17a2b8; 
+                color: white; 
+                font-weight: bold; 
+                border: none; 
+                padding: 6px 12px; 
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #138496; }
+        """)
+        self.export_btn.clicked.connect(self.export_class_to_las)
+        
+        export_layout.addWidget(self.export_combo, stretch=2)
+        export_layout.addWidget(self.export_btn, stretch=1)
+        export_group.setLayout(export_layout)
+        left_layout.addWidget(export_group)
 
         # Watermark
         watermark_layout = QHBoxLayout()
@@ -676,6 +705,7 @@ class PointCloudClassificationGUI(QWidget):
                 possible_output = os.path.join(output_dir, classified_filename)
                 
                 if os.path.exists(possible_output):
+                    self.current_classified_file = possible_output 
                     self.log_console.append(f"Rendering first classification result: {classified_filename}")
                     self.process_and_render_las(possible_output, self.viewer_cls, is_classification=True)
                 else:
@@ -701,9 +731,69 @@ class PointCloudClassificationGUI(QWidget):
         self.viewer_rgb.clear_data()
         self.viewer_cls.clear_data()
 
+        if hasattr(self, 'current_classified_file'):
+            self.current_classified_file = None
+
+    def export_class_to_las(self):
+        # Pastikan ada file yang sudah diklasifikasi
+        if not hasattr(self, 'current_classified_file') or not self.current_classified_file:
+            QMessageBox.warning(self, "Warning", "There is no classification result loaded! Please run classification first.")
+            return
+
+        selected_class = self.export_combo.currentText()
+        
+        # Mapping kelas ISPRS (sesuaikan dengan yang digunakan di viewer)
+        class_mapping = {
+            "Ground": [2],
+            "Vegetation": [3, 4, 5],
+            "Building": [6]
+        }
+        target_vals = class_mapping[selected_class]
+
+        try:
+            self.log_console.append(f"Extracting {selected_class} class, please wait...")
+            QApplication.processEvents() # Cegah GUI freeze sejenak
+            
+            # Baca file klasifikasi utuh
+            las = laspy.read(self.current_classified_file)
+            
+            if not hasattr(las, 'classification'):
+                QMessageBox.warning(self, "Error", "File LAS ini tidak memiliki atribut klasifikasi.")
+                return
+                
+            # Buat filter mask berbasis NumPy (Sangat cepat)
+            mask = np.isin(las.classification, target_vals)
+            
+            if not np.any(mask):
+                QMessageBox.information(self, "Info", f"Tidak ada point yang terdeteksi sebagai {selected_class}.")
+                return
+                
+            # Generate file LAS baru khusus kelas target
+            new_header = laspy.LasHeader(point_format=las.header.point_format, version=las.header.version)
+            new_las = laspy.LasData(new_header)
+            new_las.points = las.points[mask]
+            
+            # Format penamaan: {nama_input}_{kelas}.las
+            dir_name = os.path.dirname(self.current_classified_file)
+            base_name = os.path.basename(self.current_classified_file).replace("_classified.las", "")
+            out_filename = f"{base_name}_{selected_class.lower()}.las"
+            out_path = os.path.join(dir_name, out_filename)
+            
+            # Simpan file
+            new_las.write(out_path)
+            
+            QMessageBox.information(self, "Success", f"Successfully extracting {selected_class} class to:\n{out_filename}")
+            self.log_console.append(f"Successfully exported {selected_class} to: {out_filename}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Gagal mengekstrak kelas: {str(e)}")
+            self.log_console.append(f"Export Error: {str(e)}")
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
+
+    default_font = QFont('Segoe UI', 10)
+    app.setFont(default_font)
     
     app.setStyleSheet("""
         QWidget {
