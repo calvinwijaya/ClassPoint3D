@@ -1,17 +1,3 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-"""
-@Author: Yue Wang
-@Contact: yuewangx@mit.edu
-@File: model.py
-@Time: 2018/10/13 6:35 PM
-
-Modified by 
-@Author: An Tao, Ziyi Wu
-@Contact: ta19@mails.tsinghua.edu.cn, dazitu616@gmail.com
-@Time: 2022/7/30 7:49 PM
-"""
-
 # Define DGCNN Classifier class
 import os
 import sys
@@ -84,10 +70,7 @@ class dgcnn_sem_seg(nn.Module):
         x = self.dp1(x)
         x = self.conv9(x)                       # (batch_size, 256, num_points) -> (batch_size, 13, num_points)
         
-        # # Apply softmax activation along the class dimension (dim=1)
-        # x = F.softmax(x, dim=1)
-
-        # # Apply log operation
-        # x = torch.log(x)        
+        # Apply softmax activation along the class dimension (dim=1)
+        x = F.log_softmax(x, dim=1)      
         
         return x

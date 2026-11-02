@@ -6,7 +6,7 @@ set "ENV_NAME=mdgcnn"
 set "PYTHON_VERSION=3.10"
 set "REQUIREMENTS=requirements.txt"
 set "MAIN_SCRIPT=main.py"
-set "CONDA_PATH=C:\Users\USER\miniconda3\Library\bin\conda.bat"
+set "CONDA_PATH=C:\Users\GeoAI_INT_4\miniconda3\Library\bin\conda.bat"
 :: =====================
 
 :: Check if Conda is installed

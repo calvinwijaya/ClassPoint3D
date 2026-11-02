@@ -10,6 +10,8 @@ import json
 import cv2
 import pickle
 
+_H5_CACHE = {}
+
 ##########################################################################
 # Add new classes for loading data from h5 files
 def load_data_semseg(partition, test_area):
@@ -26,19 +28,22 @@ def load_data_semseg(partition, test_area):
         all_files = [line.rstrip() for line in f]
     with open(os.path.join(data_dir, "room_filelist.txt")) as f:
         room_filelist = [line.rstrip() for line in f]
-    data_batchlist, label_batchlist = [], []
-    for f in all_files:
-        file = h5py.File(os.path.join(DATA_DIR, f), 'r+')
-        data = file["data"][:]
-        label = file["label"][:]
-        data_batchlist.append(data)
-        label_batchlist.append(label)
-    data_batches = np.concatenate(data_batchlist, 0)
-    seg_batches = np.concatenate(label_batchlist, 0)
+    if 'all' in _H5_CACHE:
+        data_batches, seg_batches = _H5_CACHE['all']
+    else:
+        data_batchlist, label_batchlist = [], []
+        for f in all_files:
+            with h5py.File(os.path.join(DATA_DIR, f), 'r') as file:
+                data_batchlist.append(file["data"][:])
+                label_batchlist.append(file["label"][:])
+        data_batches = np.concatenate(data_batchlist, 0)
+        seg_batches = np.concatenate(label_batchlist, 0)
+        del data_batchlist, label_batchlist
+        _H5_CACHE['all'] = (data_batches, seg_batches)
     test_area_name = "Area_" + test_area
     train_idxs, test_idxs = [], []
     for i, room_name in enumerate(room_filelist):
-        if test_area_name in room_name:
+        if room_name == test_area_name:
             test_idxs.append(i)
         else:
             train_idxs.append(i)
@@ -65,6 +70,12 @@ class S3DIS(Dataset):
             np.random.shuffle(indices)
             pointcloud = pointcloud[indices]
             seg = seg[indices]
+
+            theta = np.random.uniform(0, 2 * np.pi)
+            c, s = np.cos(theta), np.sin(theta)
+            xy = pointcloud[:, 0:2].copy()
+            pointcloud[:, 0] = c * xy[:, 0] - s * xy[:, 1]
+            pointcloud[:, 1] = s * xy[:, 0] + c * xy[:, 1]
         seg = torch.LongTensor(seg)
         return pointcloud, seg
 
@@ -74,24 +85,30 @@ class S3DIS(Dataset):
 # Define class for testing set data loader
 class ScannetDatasetWholeScene():
     # prepare to give prediction on each points
-    def __init__(self, root, block_points=4096, split='test', test_area=5, stride=25.0, block_size=25.0, padding=0.001):
+    def __init__(self, root=None, block_points=4096, split='test', test_area=5, stride=25.0, block_size=25.0,
+                padding=0.001, data_list=None, room_max=None):
         self.block_points = block_points
         self.block_size = block_size
         self.padding = padding
         self.root = root
         self.split = split
         self.stride = stride
+        self.room_max = room_max
         self.scene_points_num = []
         assert split in ['train', 'test']
-        if self.split == 'train':
-            self.file_list = [d for d in os.listdir(root) if d.find('Area_%d' % test_area) == -1]
+        if data_list is not None:
+            self.file_list = ['in_memory_%d' % i for i in range(len(data_list))]
+            arrays = data_list
         else:
-            self.file_list = [d for d in os.listdir(root) if d.find('Area_%d' % test_area) != -1]
+            if self.split == 'train':
+                self.file_list = [d for d in os.listdir(root) if d.find('Area_%d' % test_area) == -1]
+            else:
+                self.file_list = [d for d in os.listdir(root) if d.find('Area_%d' % test_area) != -1]
+            arrays = [np.load(root + f) for f in self.file_list]
         self.scene_points_list = []
         self.semantic_labels_list = []
         self.room_coord_min, self.room_coord_max = [], []
-        for file in self.file_list:
-            data = np.load(root + file)
+        for data in arrays:
             points = data[:, :3]
             self.scene_points_list.append(data[:, :-1])
             self.semantic_labels_list.append(data[:, -1])
@@ -115,7 +132,7 @@ class ScannetDatasetWholeScene():
         coord_min, coord_max = np.amin(points, axis=0)[:3], np.amax(points, axis=0)[:3]
         grid_x = int(np.ceil(float(coord_max[0] - coord_min[0] - self.block_size) / self.stride) + 1)
         grid_y = int(np.ceil(float(coord_max[1] - coord_min[1] - self.block_size) / self.stride) + 1)
-        data_room, label_room, sample_weight, index_room = np.array([]), np.array([]), np.array([]),  np.array([])
+        data_parts, label_parts, weight_parts, index_parts = [], [], [], []
         for index_y in range(0, grid_y):
             for index_x in range(0, grid_x):
                 s_x = coord_min[0] + index_x * self.stride
@@ -137,11 +154,14 @@ class ScannetDatasetWholeScene():
                 np.random.shuffle(point_idxs)
                 data_batch = points[point_idxs, :]
                 normlized_xyz = np.zeros((point_size, 3))
-                normlized_xyz[:, 0] = data_batch[:, 0] / coord_max[0]
-                normlized_xyz[:, 1] = data_batch[:, 1] / coord_max[1]
-                normlized_xyz[:, 2] = data_batch[:, 2] / coord_max[2]
+                norm_max = self.room_max if self.room_max is not None else coord_max
+                normlized_xyz[:, 0] = data_batch[:, 0] / norm_max[0]
+                normlized_xyz[:, 1] = data_batch[:, 1] / norm_max[1]
+                normlized_xyz[:, 2] = data_batch[:, 2] / norm_max[2]
                 data_batch[:, 0] = data_batch[:, 0] - (s_x + self.block_size / 2.0)
                 data_batch[:, 1] = data_batch[:, 1] - (s_y + self.block_size / 2.0)
+
+                data_batch[:, 2] = data_batch[:, 2] - data_batch[:, 2].min()
 
                 data_batch[:,3:6] /= 255 # Normalize color
                 
@@ -149,14 +169,14 @@ class ScannetDatasetWholeScene():
                 label_batch = labels[point_idxs].astype(int)
                 batch_weight = self.labelweights[label_batch]
 
-                data_room = np.vstack([data_room, data_batch]) if data_room.size else data_batch
-                label_room = np.hstack([label_room, label_batch]) if label_room.size else label_batch
-                sample_weight = np.hstack([sample_weight, batch_weight]) if label_room.size else batch_weight
-                index_room = np.hstack([index_room, point_idxs]) if index_room.size else point_idxs
-        data_room = data_room.reshape((-1, self.block_points, data_room.shape[1]))
-        label_room = label_room.reshape((-1, self.block_points))
-        sample_weight = sample_weight.reshape((-1, self.block_points))
-        index_room = index_room.reshape((-1, self.block_points))
+                data_parts.append(data_batch)
+                label_parts.append(label_batch)
+                weight_parts.append(batch_weight)
+                index_parts.append(point_idxs)
+        data_room = np.concatenate(data_parts, 0).reshape((-1, self.block_points, data_parts[0].shape[1]))
+        label_room = np.concatenate(label_parts).reshape((-1, self.block_points))
+        sample_weight = np.concatenate(weight_parts).reshape((-1, self.block_points))
+        index_room = np.concatenate(index_parts).reshape((-1, self.block_points))
         return data_room, label_room, sample_weight, index_room
 
     def __len__(self):

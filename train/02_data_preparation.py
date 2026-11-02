@@ -9,7 +9,8 @@ H5_BATCH_SIZE = 1000
 block_size = 25
 data_dim = [NUM_POINT, 9] # XYZ, RGB, normXYZ
 label_dim = [NUM_POINT]
-stride = 5 # Overlap between blocks
+# stride = 5 # Overlap between blocks
+stride = 12.5
 sample_num = 10000
 random_sample = False
 data_dtype = 'float32'
@@ -31,11 +32,11 @@ def main():
         h5_fout = h5py.File(h5_filename, 'w') # add 'w' to write
         h5_fout.create_dataset(
                 'data', data=data,
-                compression='gzip', compression_opts=4,
+                compression='lzf',
                 dtype=data_dtype)
         h5_fout.create_dataset(
                 'label', data=label,
-                compression='gzip', compression_opts=1,
+                compression='lzf',
                 dtype=label_dtype)
         h5_fout.close()
 
@@ -108,18 +109,6 @@ def main():
             h5_index += 1
             buffer_size = 0
         return
-
-    blockability_dict = {}
-    for i, data_label_filename in enumerate(data_label_files):
-        print(data_label_filename)
-        is_blockable = check_block(data_label_filename, block_size=block_size, stride=stride)
-        blockability_dict[data_label_filename] = is_blockable
-
-    for area, is_blockable in blockability_dict.items():
-        if is_blockable:
-            print(f"{area} can be split into blocks.")
-        else:
-            print(f"{area} cannot be split into blocks.")
 
     sample_cnt = 0
     for i, data_label_filename in enumerate(data_label_files):

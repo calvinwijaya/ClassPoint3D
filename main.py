@@ -6,6 +6,7 @@ try:
     import laspy
 except ImportError:
     laspy = None
+import copy    
 
 from PyQt6.QtWidgets import (QApplication, QWidget, QPushButton, QVBoxLayout, 
                              QFileDialog, QTextEdit, QLabel, QHBoxLayout, QLineEdit, 
@@ -54,14 +55,15 @@ class ProcessThread(QThread):
                 self.output_signal.emit(f"========================================\n")
                 
                 command = [
-                    'python', self.script_path,
+                    sys.executable, '-u', self.script_path,
                     '--batch_size', str(int(self.batch_size)),
                     '--model', self.model,
                     '--point_cloud', point_cloud_file,
                     '--output_dir', self.output_dir
                 ]
                 
-                process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+                process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, bufsize=1)
 
                 for line in process.stdout:
                     text = line.strip()
@@ -79,11 +81,8 @@ class ProcessThread(QThread):
                     else:
                         self.output_signal.emit(text)
 
-                for line in process.stderr:
-                    self.output_signal.emit(f"Error: {line.strip()}")
 
                 process.stdout.close()
-                process.stderr.close()
                 return_code = process.wait()
                 
                 if return_code != 0:
@@ -554,7 +553,7 @@ class PointCloudClassificationGUI(QWidget):
             self.pointcloud_path.setText(folder)
             self.log_console.append(f"Selected Folder for Batch Processing: {folder}")
             
-            las_files = [f for f in os.listdir(folder) if f.lower().endswith(('.las', '.laz'))]
+            las_files = sorted(f for f in os.listdir(folder) if f.lower().endswith(('.las', '.laz')))
             if las_files:
                 first_file = os.path.join(folder, las_files[0])
                 self.log_console.append(f"Found {len(las_files)} point cloud files. Previewing first file...")
@@ -654,7 +653,7 @@ class PointCloudClassificationGUI(QWidget):
         if os.path.isfile(input_path):
             target_files.append(input_path)
         elif os.path.isdir(input_path):
-            target_files = [os.path.join(input_path, f) for f in os.listdir(input_path) if f.lower().endswith(('.las', '.laz'))]
+            target_files = sorted(os.path.join(input_path, f) for f in os.listdir(input_path) if f.lower().endswith(('.las', '.laz')))
             if not target_files:
                 self.log_console.append("Error: Folder kosong, tidak ada file .las/.laz untuk diproses.")
                 return
@@ -694,7 +693,7 @@ class PointCloudClassificationGUI(QWidget):
             if os.path.isfile(input_path):
                 first_file_to_render = input_path
             elif os.path.isdir(input_path):
-                las_files = [f for f in os.listdir(input_path) if f.lower().endswith(('.las', '.laz'))]
+                las_files = sorted(f for f in os.listdir(input_path) if f.lower().endswith(('.las', '.laz')))
                 if las_files:
                     first_file_to_render = os.path.join(input_path, las_files[0])
             
@@ -769,14 +768,14 @@ class PointCloudClassificationGUI(QWidget):
                 return
                 
             # Generate file LAS baru khusus kelas target
-            new_header = laspy.LasHeader(point_format=las.header.point_format, version=las.header.version)
-            new_las = laspy.LasData(new_header)
-            new_las.points = las.points[mask]
+            new_las = laspy.LasData(copy.deepcopy(las.header))   # keep scale, offset and CRS
+            new_las.points = las.points[mask].copy()
             
             # Format penamaan: {nama_input}_{kelas}.las
             dir_name = os.path.dirname(self.current_classified_file)
-            base_name = os.path.basename(self.current_classified_file).replace("_classified.las", "")
-            out_filename = f"{base_name}_{selected_class.lower()}.las"
+            stem, ext = os.path.splitext(os.path.basename(self.current_classified_file))
+            base_name = stem.replace("_classified", "")
+            out_filename = f"{base_name}_{selected_class.lower()}{ext}"
             out_path = os.path.join(dir_name, out_filename)
             
             # Simpan file

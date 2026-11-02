@@ -17,12 +17,16 @@ def main():
         las_files = [args.las_file]
     elif args.data_folder:
         if os.path.isdir(args.data_folder):
-            las_files = [os.path.join(args.data_folder, f) for f in os.listdir(args.data_folder) if f.endswith('.las') or f.endswith('.LAS')]
+            las_files = sorted(os.path.join(args.data_folder, f) for f in os.listdir(args.data_folder) if f.lower().endswith(('.las', '.laz')))
         else:
             print("Please provide a valid directory path for --data_folder.")
             return
     else:
         print("Please provide either --las_file or --data_folder argument.")
+        return
+
+    if len(las_files) == 0:
+        print("No .las/.laz files found in: {}".format(args.data_folder))
         return
 
     if not os.path.exists(output_folder):
@@ -53,6 +57,10 @@ def main():
         b = b[valid_mask]
         C_filtered = C[valid_mask]
 
+        # LAS RGB is often 16-bit (0-65535): scale to 0-255 so the later /255 gives 0-1
+        if max(r.max(), g.max(), b.max()) > 255:
+            r, g, b = r / 256.0, g / 256.0, b / 256.0
+
         # 3. MAPPING: Ubah (2, 5, 6) menjadi (0, 1, 2)
         mapped_C = np.zeros_like(C_filtered)
         mapped_C[C_filtered == 2] = 0
@@ -67,8 +75,8 @@ def main():
             xy_min = np.amin(data_label, axis=0)[0:2]
             data_label[:, 0:2] -= xy_min
             
-            np.save(out_filename, data_label)
-            print(f"Saved {out_filename} | Total points: {len(x)}")
+            np.save(out_filename, data_label.astype(np.float32))
+            print(f"Saved {out_filename} <- {os.path.basename(las_file)} | Total points: {len(x)}")
         else:
             print(f"Skipping {out_filename} | Tidak ada kelas 2, 5, 6 yang ditemukan.")
     

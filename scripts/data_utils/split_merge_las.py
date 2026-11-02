@@ -2,6 +2,17 @@ import laspy
 import numpy as np
 import argparse
 
+def split_indices(data, num_blocks_x, num_blocks_y, block_size):
+    """Like split_array, but returns the row indices of the points in each block."""
+    min_x = data[:, 0].min()
+    min_y = data[:, 1].min()
+    bx = np.minimum(((data[:, 0] - min_x) // block_size).astype(np.int64), num_blocks_x - 1)
+    by = np.minimum(((data[:, 1] - min_y) // block_size).astype(np.int64), num_blocks_y - 1)
+    block_id = bx * num_blocks_y + by
+    order = np.argsort(block_id, kind='stable')
+    bounds = np.searchsorted(block_id[order], np.arange(num_blocks_x * num_blocks_y + 1))
+    return [order[bounds[k]:bounds[k + 1]] for k in range(num_blocks_x * num_blocks_y)]
+
 def read_las(las_files):
     inFile = laspy.read(las_files) # read a las file
     x = inFile.x

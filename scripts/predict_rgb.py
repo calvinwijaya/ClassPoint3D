@@ -17,43 +17,24 @@ except ImportError:
     laspy = None
 
 # Pastikan path modul terbaca
-BASE_DIR = os.path.dirname(os.path.abspath(os.getcwd()))
-ROOT_DIR = BASE_DIR
-sys.path.append(os.path.join(ROOT_DIR, 'models'))
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)                    # data_utils/ and models/ inside scripts/
+sys.path.insert(0, os.path.dirname(SCRIPT_DIR))   # or one level above scripts/
 
 from data_utils.dataLoader import ScannetDatasetWholeScene
 from models.dgcnn_sem_seg import dgcnn_sem_seg
-from data_utils.split_merge_las import calculate_block_size, split_array
+from data_utils.split_merge_las import calculate_block_size, split_indices
 
-classes = ['0', '1', '2']
-class2label = {cls: i for i, cls in enumerate(classes)}
-
-def read_las(las_files):
-    inFile = laspy.read(las_files)
-    x = inFile.x
-    y = inFile.y
-    z = inFile.z
-    r = inFile.red
-    g = inFile.green
-    b = inFile.blue
-    data = np.column_stack((x, y, z, r, g, b))
-    return data
-
-def save_las(X, filename):
-    header = laspy.LasHeader(point_format=2, version="1.2")
-    las = laspy.LasData(header)
-    las.x = X[:, 0]
-    las.y = X[:, 1]
-    las.z = X[:, 2]
-    las.red = X[:, 3]
-    las.green = X[:, 4]
-    las.blue = X[:, 5]
-    
-    # Mapping otomatis (0->2, 1->5, 2->6)
-    map_array = np.array([2, 5, 6]) 
-    mapped_class = map_array[X[:, 6].astype(int)]
-    las.classification = mapped_class.astype(np.uint8)
-    las.write(filename)
+def read_las(las_file):
+    inFile = laspy.read(las_file)
+    r = np.asarray(inFile.red, dtype=np.float64)
+    g = np.asarray(inFile.green, dtype=np.float64)
+    b = np.asarray(inFile.blue, dtype=np.float64)
+    # Same RGB scaling as 01_data_conversion.py (16-bit -> 0-255)
+    if max(r.max(), g.max(), b.max()) > 255:
+        r, g, b = r / 256.0, g / 256.0, b / 256.0
+    data = np.column_stack((inFile.x, inFile.y, inFile.z, r, g, b))
+    return data, inFile
 
 def parse_args():
     parser = argparse.ArgumentParser('Model')
@@ -61,7 +42,6 @@ def parse_args():
     parser.add_argument('--gpu', type=str, default='0', help='specify gpu device')
     parser.add_argument('--num_point', type=int, default=4096, help='point number [default: 4096]')
     parser.add_argument('--model', type=str, required=True, help='DGCNN best checkpoint model')
-    parser.add_argument('--test_area', type=int, default=5, help='area for testing, option: 1-6')
     parser.add_argument('--num_votes', type=int, default=1, help='aggregate segmentation scores with voting [default: 1 for speed]')
     parser.add_argument('--num_classes', type=int, default=3, help='How many classes used for segmentation')
     parser.add_argument('--dropout', type=float, default=0.5, help='dropout rate')
@@ -73,16 +53,12 @@ def parse_args():
     return parser.parse_args()
 
 def add_vote(vote_label_pool, point_idx, pred_label, weight):
-    B = pred_label.shape[0]
-    N = pred_label.shape[1]
-    for b in range(B):
-        for n in range(N):
-            if weight[b, n] != 0 and not np.isinf(weight[b, n]):
-                if int(pred_label[b, n]) < vote_label_pool.shape[1]:
-                    vote_label_pool[int(point_idx[b, n]), int(pred_label[b, n])] += 1
+    valid = (weight != 0) & np.isfinite(weight) & (pred_label < vote_label_pool.shape[1])
+    np.add.at(vote_label_pool,
+              (point_idx[valid].astype(np.int64), pred_label[valid].astype(np.int64)), 1)
     return vote_label_pool
 
-def process_area(args, classifier, test_area, xy_min, block_data):
+def process_area(args, classifier, block_data, room_max):
     """
     Fungsi ini memproses satu area/blok. Model sudah dimuat sebelumnya.
     Mengembalikan array numpy hasil prediksi tanpa menyimpan ke disk.
@@ -92,8 +68,7 @@ def process_area(args, classifier, test_area, xy_min, block_data):
     NUM_POINT = args.num_point
     root = 'data/sem_seg_data/'
 
-    # TEST_DATASET_WHOLE_SCENE = ScannetDatasetWholeScene(root, split='test', test_area=test_area, block_points=NUM_POINT)
-    TEST_DATASET_WHOLE_SCENE = ScannetDatasetWholeScene(data_list=[block_data], block_points=NUM_POINT)
+    TEST_DATASET_WHOLE_SCENE = ScannetDatasetWholeScene(data_list=[block_data], block_points=NUM_POINT, room_max=room_max)
 
     with torch.no_grad():
         num_batches = 1 
@@ -120,7 +95,6 @@ def process_area(args, classifier, test_area, xy_min, block_data):
                 batch_label[0:real_batch_size, ...] = scene_label[start_idx:end_idx, ...]
                 batch_point_index[0:real_batch_size, ...] = scene_point_index[start_idx:end_idx, ...]
                 batch_smpw[0:real_batch_size, ...] = scene_smpw[start_idx:end_idx, ...]
-                batch_data[:, :, 3:6] /= 1.0 
 
                 torch_data = torch.Tensor(batch_data).float().cuda()
                 torch_data = torch_data.transpose(2, 1)
@@ -135,17 +109,7 @@ def process_area(args, classifier, test_area, xy_min, block_data):
                                            batch_smpw[0:real_batch_size, ...])
                 
             pred_label = np.argmax(vote_label_pool, 1)
-            whole_scene_data = whole_scene_data.astype(np.float64)
-            
-            # Kembalikan ke koordinat UTM asli
-            whole_scene_data[:, 0:2] += xy_min
-
-            # --- OPTIMASI: Vectorization (Hindari for-loop untuk data besar) ---
-            pred_label_col = pred_label.reshape(-1, 1)
-            # Ambil hanya X, Y, Z, R, G, B (indeks 0 sampai 5), abaikan dummy label di kolom 6
-            result_data = np.hstack((whole_scene_data[:, 0:6], pred_label_col))
-            
-            return result_data
+            return pred_label
 
 if __name__ == '__main__':
     start_time = time.time()
@@ -155,15 +119,16 @@ if __name__ == '__main__':
     
    # 1. BACA & SPLIT DATA LANGSUNG DI RAM
     print("Preparing data and creating temporary block...", flush=True)
-    data = read_las(args.point_cloud)
+    data, las_in = read_las(args.point_cloud)
     xy_min = np.amin(data, axis=0)[0:2]
-    data[:, 0:2] -= xy_min
-    
-    zeros_column = np.ones((data.shape[0], 1))
-    data = np.hstack((data, zeros_column))
-        
+    data[:, 0:2] -= xy_min                # same shift as 01_data_conversion.py
+    room_max = data[:, 0:3].max(axis=0)   # same as max_room_x/y/z in training
+
+    dummy_label = np.ones((data.shape[0], 1))
+    data = np.hstack((data, dummy_label))
+
     num_blocks_x, num_blocks_y = calculate_block_size(data, args.block_size)
-    blocks = split_array(data, num_blocks_x, num_blocks_y, args.block_size)
+    block_indices = split_indices(data, num_blocks_x, num_blocks_y, args.block_size)
     
     # 2. LOAD MODEL HANYA SEKALI DI SINI
     print("Load DGCNN model to GPU...", flush=True)
@@ -175,36 +140,25 @@ if __name__ == '__main__':
     
     # 3. PROSES INFERENCE (Super Cepat)
     print("Start Classification...", flush=True)
-    all_results = []
-    total_areas = len(blocks)
-    
-    # Langsung lakukan loop pada array 'blocks' yang ada di RAM
-    for idx, block_data in enumerate(blocks):
-        # Lewati blok kosong atau yang terlalu kecil (jika perlu)
-        if block_data.nbytes < 100: continue 
+    full_pred = np.zeros(data.shape[0], dtype=np.int64)
+    total_areas = len(block_indices)
 
-        args.test_area = idx
-        block_result = process_area(args, classifier, idx, xy_min, block_data)
-        all_results.append(block_result)
-        
-        # Kirim sinyal progres ke GUI
+    for idx, pidx in enumerate(block_indices):
+        if len(pidx) > 0:
+            full_pred[pidx] = process_area(args, classifier, data[pidx], room_max)
         print(f"PROGRESS:{idx + 1}/{total_areas}", flush=True)
         
     # 4. GABUNGKAN DATA & EXPORT .LAS SEKALI SAJA
-    print("Merge classification resolt and export the result...")
-    if all_results:
-        # Menyatukan seluruh blok yang ada di memori menggunakan numpy
-        final_point_cloud = np.vstack(all_results)
-        
-        filename = os.path.basename(str(args.point_cloud))
-        name, ext = os.path.splitext(filename)
-        out_las = os.path.join(args.output_dir, f"{name}_classified.las")
-        
-        # Simpan satu kali langsung jadi utuh
-        save_las(final_point_cloud, out_las)
-        print(f"Classified point cloud saved in: {out_las}")
-    else:
-        print("Warning: No valid block can be processed.")
+    print("Writing classification into the original point cloud...")
+    os.makedirs(args.output_dir, exist_ok=True)
+    filename = os.path.basename(str(args.point_cloud))
+    name, ext = os.path.splitext(filename)
+    out_las = os.path.join(args.output_dir, f"{name}_classified{ext}")
+
+    map_array = np.array([2, 5, 6], dtype=np.uint8)   # 0->2, 1->5, 2->6
+    las_in.classification = map_array[full_pred]
+    las_in.write(out_las)
+    print(f"Classified point cloud saved in: {out_las}")
 
     # 5. CLEAN UP FOLDER SEMENTARA
     # shutil.rmtree(data_dir, ignore_errors=True)

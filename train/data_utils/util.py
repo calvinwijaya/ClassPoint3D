@@ -12,7 +12,7 @@ from torch.nn.modules.batchnorm import _BatchNorm
 import torch.nn.init as initer
 import torch.nn.functional as F
 
-def cal_loss(pred, gold, smoothing=False, ignore_index=255):
+def cal_loss(pred, gold, smoothing=False, ignore_index=255, weight=None):
     ''' Calculate cross entropy loss, apply label smoothing if needed. '''
 
     gold = gold.contiguous().view(-1)

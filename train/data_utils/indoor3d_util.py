@@ -25,7 +25,7 @@ def sample_data(data, num_sample):
     if (N == num_sample):
         return data, range(N)
     elif (N > num_sample):
-        sample = np.random.choice(N, num_sample)
+        sample = np.random.choice(N, num_sample, replace=False)
         return data[sample, ...], sample
     else:
         sample = np.random.choice(N, num_sample - N)
@@ -61,6 +61,20 @@ def room2blocks(data, label, num_point, block_size=1.0, stride=1.0,
     """
     assert (stride <= block_size)
 
+    # ---- Fast spatial index: bucket points into stride x stride cells (done once) ----
+    if not random_sample:
+        cell = stride
+        cells_per_block = int(round(block_size / cell))
+        assert abs(cells_per_block * cell - block_size) < 1e-6, 'block_size must be a multiple of stride'
+        cx = np.floor(data[:, 0] / cell).astype(np.int64)
+        cy = np.floor(data[:, 1] / cell).astype(np.int64)
+        ncy = int(cy.max()) + 1
+        cell_id = cx * ncy + cy
+        order = np.argsort(cell_id, kind='stable')
+        unique_ids, starts, counts = np.unique(cell_id[order], return_index=True, return_counts=True)
+        cell_lookup = {cid: (s, s + c) for cid, s, c in zip(unique_ids.tolist(), starts.tolist(), counts.tolist())}
+        del cx, cy, cell_id
+
     limit = np.amax(data, 0)[0:3]
 
     # Get the corner location for our sampling blocks
@@ -95,17 +109,33 @@ def room2blocks(data, label, num_point, block_size=1.0, stride=1.0,
         xbeg = xbeg_list[idx]
         ybeg = ybeg_list[idx]
 
-        # to check which data belong to which block
-        xcond = (data[:, 0] <= xbeg + block_size) & (data[:, 0] >= xbeg)
-        ycond = (data[:, 1] <= ybeg + block_size) & (data[:, 1] >= ybeg)
-        cond = xcond & ycond
-        if np.sum(cond) < min_point_discard_block:  # discard block if there are less than 20 pts (original 100 pts).
-            continue
-
-        # select data according to the boundary of the block
-        block_data = data[cond, :]
-        block_label = label[cond]
-
+        if not random_sample:
+            # Gather points from the cells covered by this block (no full scan)
+            i0 = int(round(xbeg / cell))
+            j0 = int(round(ybeg / cell))
+            parts = []
+            for ci in range(i0, i0 + cells_per_block):
+                for cj in range(j0, min(j0 + cells_per_block, ncy)):
+                    r = cell_lookup.get(ci * ncy + cj)
+                    if r is not None:
+                        parts.append(order[r[0]:r[1]])
+            if len(parts) == 0:
+                continue
+            sel = np.concatenate(parts)
+            if len(sel) < min_point_discard_block:
+                continue
+            block_data = data[sel, :]
+            block_label = label[sel]
+        else:
+            # original method for random block sampling
+            xcond = (data[:, 0] <= xbeg + block_size) & (data[:, 0] >= xbeg)
+            ycond = (data[:, 1] <= ybeg + block_size) & (data[:, 1] >= ybeg)
+            cond = xcond & ycond
+            if np.sum(cond) < min_point_discard_block:
+                continue
+            block_data = data[cond, :]
+            block_label = label[cond]
+        
         if use_all_points:
             block_data_list.append(block_data)
             block_label_list.append(block_label)
@@ -134,29 +164,27 @@ def room2blocks_plus_normalized(data_label, num_point, block_size, stride,
     
     data[:, 3:6] /= 255.0 # normalized rgb color
 
-    max_room_x = max(data[:, 0])
-    max_room_y = max(data[:, 1])
-    max_room_z = max(data[:, 2])
+    max_room_x = data[:, 0].max()
+    max_room_y = data[:, 1].max()
+    max_room_z = data[:, 2].max()
 
     data_batch, label_batch = room2blocks(data, label, num_point, block_size, stride,
                                           random_sample, sample_num, sample_aug)
 
-    new_data_batch = np.zeros((data_batch.shape[0], num_point, 9)) # XYZ, RGB, normXYZ
-    for b in range(data_batch.shape[0]):
-        
-        # add normalized XYZ (column 6, 7, 8)
-        new_data_batch[b, :, 6] = data_batch[b, :, 0] / max_room_x
-        new_data_batch[b, :, 7] = data_batch[b, :, 1] / max_room_y
-        new_data_batch[b, :, 8] = data_batch[b, :, 2] / max_room_z
-        
-        # recenter for each block
-        minx = min(data_batch[b, :, 0])
-        miny = min(data_batch[b, :, 1])
-        data_batch[b, :, 0] -= (minx + block_size / 2)
-        data_batch[b, :, 1] -= (miny + block_size / 2)
+    new_data_batch = np.zeros((data_batch.shape[0], num_point, 9), dtype=np.float32) # XYZ, RGB, normXYZ
 
-    # Colummn: XYZ, RGB, normXYZ
-    new_data_batch[:, :, 0:6] = data_batch[:,:,0:6] # for XYZ, RGB
+    # add normalized XYZ (column 6, 7, 8)
+    new_data_batch[:, :, 6] = data_batch[:, :, 0] / max_room_x
+    new_data_batch[:, :, 7] = data_batch[:, :, 1] / max_room_y
+    new_data_batch[:, :, 8] = data_batch[:, :, 2] / max_room_z
+
+    # recenter for each block
+    data_batch[:, :, 0] -= data_batch[:, :, 0].min(axis=1, keepdims=True) + block_size / 2
+    data_batch[:, :, 1] -= data_batch[:, :, 1].min(axis=1, keepdims=True) + block_size / 2
+    data_batch[:, :, 2] -= data_batch[:, :, 2].min(axis=1, keepdims=True)  # height relative to lowest point in block
+
+    # Column: XYZ, RGB, normXYZ
+    new_data_batch[:, :, 0:6] = data_batch[:, :, 0:6]
     
     return new_data_batch, label_batch
 

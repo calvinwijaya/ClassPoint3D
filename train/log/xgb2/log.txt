@@ -1,0 +1,29 @@
+(mdgcnn) C:\Users\GeoAI_INT_4\Downloads\ClassPoint3D\train>python train_xgb.py --train_dir "W:/2026/06 HPI IKN/00 RAW DATA/DRONE LIDAR/FINISHED" --max_points_per_file 5000000 --predict_all "W:/2026/06 HPI IKN/00 RAW DATA/DRONE LIDAR/FINISHED/IKN_D2_FINISHED.laz" "C:/Users/GeoAI_INT_4/Downloads/IKN_D2_PREDICTION.laz"
+Loading training data...
+        Skipping test file found in training folder: IKN_D2_FINISHED.laz
+        - ikn_d3_finished.laz (82325714 points, 80831686 in kept classes, sampled 5000000, classes: [0, 1, 2, 5, 6])
+        - ikn_d4_finished.laz (103134343 points, 102864566 in kept classes, sampled 5000001, classes: [0, 1, 2, 3, 5, 6])
+        - ikn_e2_finished.laz (112994992 points, 110558709 in kept classes, sampled 5000001, classes: [0, 1, 2, 5, 6, 18])
+        - ikn_e3_finished.laz (94883988 points, 93360795 in kept classes, sampled 4999999, classes: [0, 1, 2, 5, 6, 12])
+        - ikn_f2_finished.laz (91609117 points, 91116607 in kept classes, sampled 5010443, classes: [0, 1, 2, 3, 5, 6, 15])
+        - ikn_f4_finished.laz (65043361 points, 64658212 in kept classes, sampled 4999999, classes: [0, 1, 2, 5, 6])
+        - ikn_f5_finished.laz (82835804 points, 82285051 in kept classes, sampled 5000000, classes: [0, 1, 2, 3, 5, 6])
+Loading test data...
+        Test points in kept classes [2, 5, 6]: 62015298 of 63504813
+        Class mapping (original -> index): {2: 0, 5: 1, 6: 2}
+        Training samples: 35010443
+        Testing samples: 62015298
+        Using features with indices: [0, 1, 2, 3, 4, 5]
+
+Training the model...
+        ne: 50, md: None - acc: 0.6750868793696678 f1: 0.6746709215191293
+        ne: 100, md: None - acc: 0.627856726577368 f1: 0.6341617587291783
+        ne: 150, md: None - acc: 0.6177905651602287 f1: 0.6252565556781408
+        ne: 200, md: None - acc: 0.6078773176257252 f1: 0.6181453916447536
+---> Best parameters: ne: 50, md: None
+---> Confusion matrix (best model), rows = true, cols = predicted, order = [2, 5, 6]:
+[[26948604  5112816  3350904]
+ [ 7365792 10065705  1648139]
+ [ 1488896  1183037  4851405]]
+---> Training time: 186.1257507801056 seconds
+Saved prediction to: C:/Users/GeoAI_INT_4/Downloads/IKN_D2_PREDICTION.laz
